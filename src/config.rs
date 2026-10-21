@@ -43,6 +43,8 @@ pub struct ModuleConfigs {
     pub solid: SolidConfig,
     #[serde(default)]
     pub image: ImageConfig,
+    #[serde(default)]
+    pub spherical: SphericalConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +122,39 @@ impl Default for ImageConfig {
 fn default_fit_mode() -> String {
     "cover".to_string()
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SphericalConfig {
+    /// Radius of the sphere (positive curvature)
+    #[serde(default = "default_spherical_radius")]
+    pub radius: f32,
+    /// Color palette name or custom colors
+    #[serde(default)]
+    pub palette: PaletteConfig,
+    /// Animation speed (radians per second)
+    #[serde(default = "default_spherical_pan_rate")]
+    pub pan_rate: f32,
+    /// Enable mouse interaction (parallax)
+    #[serde(default = "default_true")]
+    pub interactive: bool,
+    /// Shader path (optional, uses built-in if not set)
+    pub shader_path: Option<PathBuf>,
+}
+
+impl Default for SphericalConfig {
+    fn default() -> Self {
+        Self {
+            radius: default_spherical_radius(),
+            palette: Default::default(),
+            pan_rate: default_spherical_pan_rate(),
+            interactive: default_true(),
+            shader_path: None,
+        }
+    }
+}
+
+fn default_spherical_radius() -> f32 { 1.0 }
+fn default_spherical_pan_rate() -> f32 { 0.15 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]

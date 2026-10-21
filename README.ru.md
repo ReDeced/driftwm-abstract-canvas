@@ -1,4 +1,4 @@
-# driftwm-wallpaper
+# driftwm-abstract-canvas
 
 Внешняя система обоев для [driftwm](https://github.com/roman/driftwm) через IPC.
 
@@ -21,21 +21,21 @@
 ### Из исходного кода
 
 ```bash
-cargo install --git https://github.com/roman/driftwm-wallpaper
+cargo install --git https://github.com/ReDeced/driftwm-abstract-canvas
 ```
 
 Или сборка локально:
 
 ```bash
-git clone https://github.com/roman/driftwm-wallpaper
-cd driftwm-wallpaper
+git clone https://github.com/ReDeced/driftwm-abstract-canvas
+cd driftwm-abstract-canvas
 cargo build --release
-./target/release/driftwm-wallpaper
+./target/release/driftwm-abstract-canvas
 ```
 
 ## Конфигурация
 
-Скопируйте `config.toml.example` в `~/.config/driftwm-wallpaper/config.toml` или `/etc/driftwm-wallpaper/config.toml` и настройте:
+Скопируйте `config.toml.example` в `~/.config/driftwm-abstract-canvas/config.toml` или `/etc/driftwm-abstract-canvas/config.toml` и настройте:
 
 ```toml
 # Модуль обоев: "hyperbolic", "solid", "image"
@@ -55,7 +55,7 @@ path = "~/Pictures/wallpaper.jpg"
 fit = "cover"
 
 [layer]
-namespace = "driftwm-wallpaper"
+namespace = "driftwm-abstract-canvas"
 z_order = -100
 output = ""
 anchors = ["top", "bottom", "left", "right"]
@@ -76,27 +76,43 @@ palette_key = "background"
 
 ```bash
 # Запуск с конфигурацией по умолчанию
-driftwm-wallpaper
+driftwm-abstract-canvas
 
 # Запуск с пользовательской конфигурацией
-driftwm-wallpaper -c /путь/к/config.toml
+driftwm-abstract-canvas -c /путь/к/config.toml
 
 # Включить отладочное логирование
-driftwm-wallpaper --debug
+driftwm-abstract-canvas --debug
 
 # Вывести текущее состояние driftwm и выйти
-driftwm-wallpaper --dump-state
+driftwm-abstract-canvas --dump-state
 
 # Переопределить модуль
-driftwm-wallpaper -m solid
+driftwm-abstract-canvas -m solid
 ```
+
+## Интеграция с driftwm
+
+Добавьте в конфигурацию driftwm (`~/.config/driftwm/config.toml` или аналогичный):
+
+```toml
+autostart = [
+    "driftwm-abstract-canvas",
+]
+
+[background]
+type = "none"
+```
+
+- `autostart` запускает обои при старте сессии driftwm.
+- `[background] type = "none"` отключает встроенный фон driftwm, чтобы поверхность layer-shell обоев была видна.
 
 ## Архитектура
 
 ```
 ┌─────────────────┐     IPC (Unix socket)      ┌──────────────────┐
-│   driftwm       │ ◄─────────────────────────► │ driftwm-wallpaper │
-│  (композитор)   │   События состояния, комманды│  (приложение обоев)│
+│   driftwm       │ ◄─────────────────────────► │ driftwm-abstract-canvas │
+│  (композитор)   │   События состояния, команды│  (приложение обоев)│
 └─────────────────┘                              └──────────────────┘
                                                         │
                                                         ▼
@@ -140,6 +156,14 @@ GPL-3.0-or-later - подробности в [LICENSE](LICENSE).
 3. Внесите изменения
 4. Запустите тесты: `cargo test`
 5. Отправьте pull request
+
+## AI / ИИ
+
+Этот проект был создан с использованием ИИ. Мы также рекомендуем использовать
+инструменты ИИ при создании новых абстрактных модулей обоев для этого репозитория
+— трейт `WallpaperModule` и WGSL-шейдеры хорошо подходят для кода, сгенерированного
+ИИ, а файл `AGENTS.md` содержит рекомендации, помогающие ИИ-агентам писать
+согласованные модули.
 
 ## Связанные проекты
 

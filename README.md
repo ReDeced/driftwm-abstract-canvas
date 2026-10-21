@@ -1,4 +1,4 @@
-# driftwm-wallpaper
+# driftwm-abstract-canvas
 
 External wallpaper system for [driftwm](https://github.com/roman/driftwm) via IPC.
 
@@ -21,24 +21,24 @@ A standalone wallpaper application that communicates with driftwm through its IP
 ### From Source
 
 ```bash
-cargo install --git https://github.com/roman/driftwm-wallpaper
+cargo install --git https://github.com/ReDeced/driftwm-abstract-canvas
 ```
 
 Or build locally:
 
 ```bash
-git clone https://github.com/roman/driftwm-wallpaper
-cd driftwm-wallpaper
+git clone https://github.com/ReDeced/driftwm-abstract-canvas
+cd driftwm-abstract-canvas
 cargo build --release
-./target/release/driftwm-wallpaper
+./target/release/driftwm-abstract-canvas
 ```
 
 ## Configuration
 
-Copy `config.toml.example` to `~/.config/driftwm-wallpaper/config.toml` or `/etc/driftwm-wallpaper/config.toml` and customize:
+Copy `config.toml.example` to `~/.config/driftwm-abstract-canvas/config.toml` or `/etc/driftwm-abstract-canvas/config.toml` and customize:
 
 ```toml
-# Wallpaper module: "hyperbolic", "solid", "image"
+# Wallpaper module: "hyperbolic", "solid", "image", "spherical"
 module = "hyperbolic"
 
 [modules.hyperbolic]
@@ -54,8 +54,14 @@ color = "#1a1a2e"
 path = "~/Pictures/wallpaper.jpg"
 fit = "cover"
 
+[modules.spherical]
+radius = 1.0         # Sphere radius (positive curvature)
+pan_rate = 0.15      # Radians per second
+palette = { type = "named", value = "sphere" }
+interactive = true
+
 [layer]
-namespace = "driftwm-wallpaper"
+namespace = "driftwm-abstract-canvas"
 z_order = -100
 output = ""
 anchors = ["top", "bottom", "left", "right"]
@@ -76,26 +82,42 @@ palette_key = "background"
 
 ```bash
 # Run with default config
-driftwm-wallpaper
+driftwm-abstract-canvas
 
 # Run with custom config
-driftwm-wallpaper -c /path/to/config.toml
+driftwm-abstract-canvas -c /path/to/config.toml
 
 # Enable debug logging
-driftwm-wallpaper --debug
+driftwm-abstract-canvas --debug
 
 # Dump current driftwm state and exit
-driftwm-wallpaper --dump-state
+driftwm-abstract-canvas --dump-state
 
 # Override module
-driftwm-wallpaper -m solid
+driftwm-abstract-canvas -m solid
 ```
+
+## Integration with driftwm
+
+Add to your driftwm configuration (`~/.config/driftwm/config.toml` or equivalent):
+
+```toml
+autostart = [
+    "driftwm-abstract-canvas",
+]
+
+[background]
+type = "none"
+```
+
+- `autostart` launches the wallpaper when the driftwm session starts.
+- `[background] type = "none"` disables driftwm's own background so the layer-shell surface of the wallpaper is visible.
 
 ## Architecture
 
 ```
 ┌─────────────────┐     IPC (Unix socket)      ┌──────────────────┐
-│   driftwm       │ ◄─────────────────────────► │ driftwm-wallpaper │
+│   driftwm       │ ◄─────────────────────────► │ driftwm-abstract-canvas │
 │  (compositor)   │   State events, commands    │  (wallpaper app)  │
 └─────────────────┘                              └──────────────────┘
                                                         │
@@ -140,6 +162,14 @@ GPL-3.0-or-later - see [LICENSE](LICENSE) for details.
 3. Make your changes
 4. Run tests: `cargo test`
 5. Submit a pull request
+
+## AI Disclosure
+
+This project was created with the assistance of AI. We also recommend using AI
+tools when creating new abstract wallpaper modules for this repository — the
+`WallpaperModule` trait and WGSL shaders are well-suited to AI-generated code,
+and the `AGENTS.md` file contains guidelines to help AI agents write consistent
+modules.
 
 ## Related Projects
 

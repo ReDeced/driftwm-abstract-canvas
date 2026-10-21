@@ -1,6 +1,6 @@
 //! Wallpaper management and rendering
 
-use crate::config::{AppConfig, HyperbolicConfig, ModuleConfigs, PaletteConfig};
+use crate::config::{AppConfig, HyperbolicConfig, ModuleConfigs, PaletteConfig, SphericalConfig};
 use crate::ipc::StateInfo;
 use crate::renderer::{Renderer, FrameData, OutputState, WindowState};
 use crate::layer_shell;
@@ -87,9 +87,22 @@ impl WallpaperManager {
         _layer: &crate::config::LayerConfig,
     ) -> Result<Box<dyn WallpaperModule>> {
         match name {
-            "hyperbolic" => Ok(Box::new(HyperbolicModule::new(&modules.hyperbolic)?)),
-            "solid" => Ok(Box::new(SolidModule::new(&modules.solid)?)),
-            "image" => Ok(Box::new(ImageModule::new(&modules.image)?)),
+            "hyperbolic" => {
+                let module = <HyperbolicModule as WallpaperModule>::new(modules)?;
+                Ok(Box::new(module))
+            }
+            "solid" => {
+                let module = <SolidModule as WallpaperModule>::new(modules)?;
+                Ok(Box::new(module))
+            }
+            "image" => {
+                let module = <ImageModule as WallpaperModule>::new(modules)?;
+                Ok(Box::new(module))
+            }
+            "spherical" => {
+                let module = <SphericalModule as WallpaperModule>::new(modules)?;
+                Ok(Box::new(module))
+            }
             _ => anyhow::bail!("Unknown wallpaper module: {}", name),
         }
     }
@@ -190,8 +203,8 @@ impl WallpaperManager {
 
 /// Trait for wallpaper modules
 pub trait WallpaperModule: Send + Sync {
-    /// Initialize the module
-    fn new(config: &HyperbolicConfig) -> Result<Self> where Self: Sized;
+    /// Initialize the module from module configs
+    fn new(modules: &ModuleConfigs) -> Result<Self> where Self: Sized;
 
     /// Update internal state from frame data
     fn update(&mut self, frame: &FrameData);
@@ -318,8 +331,8 @@ impl HyperbolicModule {
 }
 
 impl WallpaperModule for HyperbolicModule {
-    fn new(config: &HyperbolicConfig) -> Result<Self> {
-        Self::new(config)
+    fn new(modules: &ModuleConfigs) -> Result<Self> {
+        Self::new(&modules.hyperbolic)
     }
 
     fn update(&mut self, frame: &FrameData) {
@@ -530,9 +543,8 @@ impl SolidModule {
 }
 
 impl WallpaperModule for SolidModule {
-    fn new(_config: &HyperbolicConfig) -> Result<Self> {
-        // This won't be called directly, use SolidModule::new(&config.solid)
-        anyhow::bail!("Use SolidModule::new with SolidConfig")
+    fn new(modules: &ModuleConfigs) -> Result<Self> {
+        Self::new(&modules.solid)
     }
 
     fn update(&mut self, _frame: &FrameData) {}
@@ -681,8 +693,8 @@ impl ImageModule {
 }
 
 impl WallpaperModule for ImageModule {
-    fn new(_config: &HyperbolicConfig) -> Result<Self> {
-        anyhow::bail!("Use ImageModule::new with ImageConfig")
+    fn new(modules: &ModuleConfigs) -> Result<Self> {
+        Self::new(&modules.image)
     }
 
     fn update(&mut self, _frame: &FrameData) {}
@@ -848,5 +860,170 @@ impl ImageModule {
         }
 
         Ok(())
+    }
+}
+
+/// Uniforms for spherical shader (positive curvature / elliptic geometry)
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SphericalUniforms {
+    resolution: [f32; 2],
+    camera: [f32; 2],
+    zoom: f32,
+    time: f32,
+    pan_angle: f32,
+    pan_rate: f32,
+    radius: f32,
+    palette_colors: [[f32; 4]; 32],
+    palette_size: u32,
+    mode: u32,
+    _padding: [u32; 2],
+}
+
+/// Spherical wallpaper module — positive curvature tiling on a sphere
+pub struct SphericalModule {
+    config: SphericalConfig,
+    pipeline: Option<wgpu::RenderPipeline>,
+    bind_group: Option<wgpu::BindGroup>,
+    uniform_buffer: Option<wgpu::Buffer>,
+    width: u32,
+    height: u32,
+    pan_angle: f32,
+    palette: Vec<[f32; 4]>,
+}
+
+impl SphericalModule {
+    pub fn new(config: &SphericalConfig) -> Result<Self> {
+        let palette = Self::parse_palette(&config.palette)?;
+
+        Ok(Self {
+            config: config.clone(),
+            pipeline: None,
+            bind_group: None,
+            uniform_buffer: None,
+            width: 0,
+            height: 0,
+            pan_angle: 0.0,
+            palette,
+        })
+    }
+
+    fn parse_palette(palette_config: &PaletteConfig) -> Result<Vec<[f32; 4]>> {
+        match palette_config {
+            PaletteConfig::Named(name) => {
+                match name.as_str() {
+                    "default" | "noctalia" => Ok(vec![
+                        [0.05, 0.05, 0.15, 1.0],  // Deep background
+                        [0.15, 0.1, 0.3, 1.0],    // Dark accent
+                        [0.3, 0.2, 0.5, 1.0],     // Mid tone
+                        [0.6, 0.4, 0.8, 1.0],     // Light accent
+                        [0.9, 0.7, 1.0, 1.0],     // Highlight
+                    ]),
+                    "monochrome" => Ok(vec![
+                        [0.05, 0.05, 0.05, 1.0],
+                        [0.15, 0.15, 0.15, 1.0],
+                        [0.3, 0.3, 0.3, 1.0],
+                        [0.6, 0.6, 0.6, 1.0],
+                        [0.9, 0.9, 0.9, 1.0],
+                    ]),
+                    "solarized" => Ok(vec![
+                        [0.0, 0.17, 0.21, 1.0],   // base03
+                        [0.03, 0.21, 0.26, 1.0],  // base02
+                        [0.35, 0.43, 0.45, 1.0],  // base01
+                        [0.58, 0.63, 0.63, 1.0],  // base00
+                        [0.83, 0.85, 0.82, 1.0],  // base0
+                    ]),
+                    "sphere" => Ok(vec![
+                        [0.1, 0.2, 0.4, 1.0],     // Deep ocean
+                        [0.2, 0.4, 0.8, 1.0],     // Ocean
+                        [0.4, 0.6, 0.9, 1.0],     // Light ocean
+                        [0.8, 0.9, 1.0, 1.0],     // Foam
+                        [1.0, 0.8, 0.6, 1.0],     // Sand
+                        [0.6, 0.4, 0.2, 1.0],     // Earth
+                        [0.2, 0.5, 0.2, 1.0],     // Vegetation
+                        [0.9, 0.9, 0.7, 1.0],     // Cloud
+                    ]),
+                    _ => Ok(vec![
+                        [0.05, 0.05, 0.15, 1.0],
+                        [0.15, 0.1, 0.3, 1.0],
+                        [0.3, 0.2, 0.5, 1.0],
+                        [0.6, 0.4, 0.8, 1.0],
+                        [0.9, 0.7, 1.0, 1.0],
+                    ]),
+                }
+            }
+            PaletteConfig::Custom(colors) => {
+                let mut palette = Vec::new();
+                for color in colors {
+                    let c = Self::parse_hex_color(color)?;
+                    palette.push(c);
+                }
+                if palette.is_empty() {
+                    anyhow::bail!("Custom palette must have at least one color");
+                }
+                Ok(palette)
+            }
+        }
+    }
+
+    fn parse_hex_color(hex: &str) -> Result<[f32; 4]> {
+        let hex = hex.trim_start_matches('#');
+        let (r, g, b, a) = match hex.len() {
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16)?;
+                let g = u8::from_str_radix(&hex[2..4], 16)?;
+                let b = u8::from_str_radix(&hex[4..6], 16)?;
+                (r, g, b, 255)
+            }
+            8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16)?;
+                let g = u8::from_str_radix(&hex[2..4], 16)?;
+                let b = u8::from_str_radix(&hex[4..6], 16)?;
+                let a = u8::from_str_radix(&hex[6..8], 16)?;
+                (r, g, b, a)
+            }
+            _ => anyhow::bail!("Invalid hex color: {}", hex),
+        };
+        Ok([
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ])
+    }
+}
+
+impl WallpaperModule for SphericalModule {
+    fn new(modules: &ModuleConfigs) -> Result<Self> {
+        Self::new(&modules.spherical)
+    }
+
+    fn update(&mut self, frame: &FrameData) {
+        self.pan_angle += self.config.pan_rate * (1.0 / 60.0);
+        let camera_delta = (frame.camera.0.abs() + frame.camera.1.abs()) as f32 * 0.001;
+        self.pan_angle += camera_delta;
+    }
+
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline.as_ref().unwrap()
+    }
+
+    fn bind_group(&self) -> &wgpu::BindGroup {
+        self.bind_group.as_ref().unwrap()
+    }
+
+    fn resize(&mut self, _width: u32, _height: u32) {
+        self.pipeline = None;
+    }
+
+    fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()> {
+        self.config = modules.spherical.clone();
+        self.palette = Self::parse_palette(&self.config.palette)?;
+        self.pipeline = None;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "spherical"
     }
 }

@@ -1,7 +1,7 @@
 # driftwm-wallpaper configuration
 # Copy this to ~/.config/driftwm-wallpaper/config.toml or /etc/driftwm-wallpaper/config.toml
 
-# Wallpaper module to use: "hyperbolic", "solid", "image"
+# Wallpaper module to use: "hyperbolic", "solid", "image", "spherical"
 module = "hyperbolic"
 
 # Module-specific configurations
@@ -15,7 +15,7 @@ palette = { type = "named", value = "noctalia" }
 # Enable mouse interaction (parallax)
 interactive = true
 # Custom shader path (optional, uses built-in if not set)
-# shader_path = "~/.config/driftwm-wallpaper/custom.wgsl"
+# shader_path = "~/.config/driftwm-abstract-canvas/custom.wgsl"
 
 [modules.solid]
 # Solid color in hex format (#RRGGBB or #RRGGBBAA)
@@ -27,10 +27,22 @@ color = "#1a1a2e"
 # Fit mode: "cover", "contain", "fill", "center", "tile"
 fit = "cover"
 
+[modules.spherical]
+# Radius of the sphere (positive curvature)
+radius = 1.0
+# Animation speed in radians per second
+pan_rate = 0.15
+# Color palette: named ("default", "monochrome", "solarized", "sphere") or custom array of hex colors
+palette = { type = "named", value = "sphere" }
+# Enable mouse interaction (parallax)
+interactive = true
+# Custom shader path (optional, uses built-in if not set)
+# shader_path = "~/.config/driftwm-abstract-canvas/custom.wgsl"
+
 # Layer shell configuration
 [layer]
 # Layer namespace (for debugging/identification)
-namespace = "driftwm-wallpaper"
+namespace = "driftwm-abstract-canvas"
 # Z-order (lower = further back, negative = behind everything)
 z_order = -100
 # Output name to target (empty = all outputs)

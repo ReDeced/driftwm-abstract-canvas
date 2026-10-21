@@ -26,6 +26,15 @@ fn test_solid_config_defaults() {
 }
 
 #[test]
+fn test_spherical_config_defaults() {
+    let config = config::SphericalConfig::default();
+    assert_eq!(config.radius, 1.0);
+    assert_eq!(config.pan_rate, 0.15);
+    assert!(config.interactive);
+    assert!(config.shader_path.is_none());
+}
+
+#[test]
 fn test_image_config_defaults() {
     let config = config::ImageConfig::default();
     assert_eq!(config.fit, "cover");
@@ -92,6 +101,8 @@ fn test_module_configs_default() {
     assert_eq!(modules.hyperbolic.pan_rate, 0.15);
     assert_eq!(modules.solid.color, "#1a1a2e");
     assert_eq!(modules.image.fit, "cover");
+    assert_eq!(modules.spherical.radius, 1.0);
+    assert_eq!(modules.spherical.pan_rate, 0.15);
 }
 
 #[test]
