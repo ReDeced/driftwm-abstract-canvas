@@ -110,13 +110,18 @@ async fn main() -> Result<()> {
                     }
                     Err(e) => {
                         error!("IPC error: {}", e);
-                        // Try to reconnect
+                        // Try to reconnect (subscribe consumes the client, so we
+                        // create a fresh one and take its event stream directly)
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         match ipc_client::IpcClient::connect().await {
                             Ok(new_client) => {
-                                ipc_client = new_client;
-                                event_stream = ipc_client.subscribe().await?;
-                                info!("Reconnected to driftwm IPC");
+                                match new_client.subscribe().await {
+                                    Ok(new_stream) => {
+                                        event_stream = new_stream;
+                                        info!("Reconnected to driftwm IPC");
+                                    }
+                                    Err(e) => error!("Failed to resubscribe: {}", e),
+                                }
                             }
                             Err(e) => {
                                 error!("Failed to reconnect: {}", e);

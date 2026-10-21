@@ -71,15 +71,15 @@ impl IpcClient {
     }
 
     /// Subscribe to state events
-    pub async fn subscribe(&mut self) -> Result<EventStream> {
+    ///
+    /// After the `Ok` reply, the compositor pushes [`Event`] lines on the same
+    /// connection, so this method takes ownership of the client's stream and
+    /// hands it to the [`EventStream`]. The client is consumed and must not be
+    /// used afterwards (create a new [`IpcClient`] to reconnect).
+    pub async fn subscribe(mut self) -> Result<EventStream> {
         let reply = self.send_request(Request::Subscribe).await?;
         match reply {
-            Ok(Response::Ok) => {
-                // Take ownership of the stream
-                let stream = std::mem::replace(&mut self.stream, 
-                    tokio::net::UnixStream::connect("/dev/null").await?);
-                Ok(EventStream::new(stream))
-            }
+            Ok(Response::Ok) => Ok(EventStream::new(self.stream)),
             Ok(other) => bail!("Unexpected subscribe response: {:?}", other),
             Err(e) => bail!("Subscribe failed: {}", e),
         }
