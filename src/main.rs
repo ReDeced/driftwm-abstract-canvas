@@ -86,6 +86,8 @@ async fn main() -> Result<()> {
                 Some(layer_shell::LayerEvent::Configure { width, height }) => {
                     wallpaper.resize(width, height);
                     layer.ack_configure();
+                    // Request first frame so the compositor sends us a frame callback
+                    layer.request_redraw();
                 }
                 Some(layer_shell::LayerEvent::Close) => {
                     info!("Layer shell closed");

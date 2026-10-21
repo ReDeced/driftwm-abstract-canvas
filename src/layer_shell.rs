@@ -139,6 +139,11 @@ impl LayerShell {
         // Initialize SHM pool
         let shm_pool = SlotPool::new(1920 * 1080 * 4, &data.shm)?;
 
+        // Initial commit so the compositor sends us a configure event
+        if let Some(ref ls) = data.layer_surface {
+            ls.wl_surface().commit();
+        }
+
         Ok(Self {
             connection,
             event_queue,
@@ -214,7 +219,7 @@ impl LayerShell {
         // Attach buffer to surface
         if let Some(surface) = &self.layer_surface {
             buffer.attach_to(&surface.wl_surface())?;
-            surface.wl_surface().damage_buffer(0, 0, self.width as i32, self.height as i32);
+            surface.wl_surface().damage_buffer(0, 0, width as i32, height as i32);
             surface.wl_surface().commit();
         }
 
