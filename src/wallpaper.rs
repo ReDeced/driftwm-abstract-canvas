@@ -1,0 +1,852 @@
+//! Wallpaper management and rendering
+
+use crate::config::{AppConfig, HyperbolicConfig, ModuleConfigs, PaletteConfig};
+use crate::ipc::StateInfo;
+use crate::renderer::{Renderer, FrameData, OutputState, WindowState};
+use crate::layer_shell;
+use anyhow::Result;
+use std::sync::Arc;
+use tracing::{info, debug};
+
+/// Uniforms for hyperbolic shader
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct HyperbolicUniforms {
+    resolution: [f32; 2],
+    camera: [f32; 2],
+    zoom: f32,
+    time: f32,
+    pan_angle: f32,
+    pan_rate: f32,
+    rmax: f32,
+    palette_colors: [[f32; 4]; 16],
+    palette_size: u32,
+    _padding: [u32; 3],
+}
+
+/// Uniforms for solid color shader
+#[repr(C)]
+#[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+struct SolidUniforms {
+    color: [f32; 4],
+}
+
+/// Manages wallpaper modules and rendering
+pub struct WallpaperManager {
+    config: Arc<AppConfig>,
+    current_module: Box<dyn WallpaperModule>,
+    renderer: Renderer,
+    state: WallpaperState,
+}
+
+struct WallpaperState {
+    camera: (f64, f64),
+    zoom: f64,
+    outputs: Vec<OutputState>,
+    windows: Vec<WindowState>,
+    time: f64,
+    frame_count: u64,
+}
+
+impl WallpaperManager {
+    /// Create a new wallpaper manager
+    pub async fn new(config: AppConfig, module_override: Option<String>) -> Result<Self> {
+        let config = Arc::new(config);
+        let module_name = module_override.unwrap_or_else(|| config.module.clone());
+
+        // Create renderer (headless, renders to offscreen texture)
+        let renderer = Renderer::new(&config.render).await?;
+        let current_module = Self::create_module(&module_name, &config.modules, &config.layer)?;
+
+        info!("Loaded wallpaper module: {}", module_name);
+
+        Ok(Self {
+            config,
+            current_module,
+            renderer,
+            state: WallpaperState {
+                camera: (0.0, 0.0),
+                zoom: 1.0,
+                outputs: Vec::new(),
+                windows: Vec::new(),
+                time: 0.0,
+                frame_count: 0,
+            },
+        })
+    }
+
+    /// Get the configuration
+    pub fn config(&self) -> &AppConfig {
+        &self.config
+    }
+
+    /// Create a wallpaper module by name
+    fn create_module(
+        name: &str,
+        modules: &ModuleConfigs,
+        _layer: &crate::config::LayerConfig,
+    ) -> Result<Box<dyn WallpaperModule>> {
+        match name {
+            "hyperbolic" => Ok(Box::new(HyperbolicModule::new(&modules.hyperbolic)?)),
+            "solid" => Ok(Box::new(SolidModule::new(&modules.solid)?)),
+            "image" => Ok(Box::new(ImageModule::new(&modules.image)?)),
+            _ => anyhow::bail!("Unknown wallpaper module: {}", name),
+        }
+    }
+
+    /// Update state from driftwm IPC
+    pub fn update_state(&mut self, state: StateInfo) {
+        // Use the active output's camera/zoom, or the global one
+        let active_output = state.outputs.iter().find(|o| o.active);
+        
+        if let Some(output) = active_output {
+            self.state.camera = output.camera;
+            self.state.zoom = output.zoom;
+        } else {
+            self.state.camera = state.camera;
+            self.state.zoom = state.zoom;
+        }
+
+        self.state.outputs = state.outputs.into_iter().map(|o| OutputState {
+            name: o.name,
+            camera: o.camera,
+            zoom: o.zoom,
+            size: o.size,
+            active: o.active,
+        }).collect();
+
+        self.state.windows = state.windows.into_iter().map(|w| WindowState {
+            id: w.id,
+            app_id: w.app_id,
+            position: w.position,
+            size: w.size,
+            is_focused: w.is_focused,
+        }).collect();
+
+        debug!("Updated state: camera={:?}, zoom={}, outputs={}, windows={}", 
+               self.state.camera, self.state.zoom, 
+               self.state.outputs.len(), self.state.windows.len());
+    }
+
+    /// Resize the rendering surface
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.renderer.resize(width, height);
+        self.current_module.resize(width, height);
+    }
+
+    /// Render a frame and present via SHM
+    pub async fn render_frame(&mut self, layer: &mut layer_shell::LayerShell, width: u32, height: u32) -> Result<()> {
+        self.state.frame_count += 1;
+        self.state.time = self.state.frame_count as f64 / 60.0; // Approximate
+
+        // Prepare frame data
+        let frame_data = FrameData {
+            camera: self.state.camera,
+            zoom: self.state.zoom,
+            outputs: self.state.outputs.clone(),
+            windows: self.state.windows.clone(),
+            time: self.state.time,
+            frame_count: self.state.frame_count,
+            width,
+            height,
+        };
+
+        // Let the module update its internal state
+        self.current_module.update(&frame_data);
+
+        // Get pipeline and bind group from module
+        let pipeline = self.current_module.pipeline();
+        let bind_group = self.current_module.bind_group();
+
+        // Render to offscreen texture
+        self.renderer.begin_render_pass(pipeline, bind_group)?;
+
+        // Copy to CPU
+        let pixels = self.renderer.copy_to_cpu()?;
+
+        // Present via SHM
+        layer.present_shm(pixels, width, height)?;
+
+        Ok(())
+    }
+
+    /// Reload configuration
+    pub async fn reload_config(&mut self) -> Result<()> {
+        let new_config = AppConfig::load(None)?;
+        let module_name = new_config.module.clone();
+        
+        // If module changed, recreate it
+        if module_name != self.config.module {
+            self.current_module = Self::create_module(&module_name, &new_config.modules, &new_config.layer)?;
+            info!("Switched to wallpaper module: {}", module_name);
+        }
+
+        self.config = Arc::new(new_config);
+        self.current_module.reload_config(&self.config.modules)?;
+        
+        Ok(())
+    }
+}
+
+/// Trait for wallpaper modules
+pub trait WallpaperModule: Send + Sync {
+    /// Initialize the module
+    fn new(config: &HyperbolicConfig) -> Result<Self> where Self: Sized;
+
+    /// Update internal state from frame data
+    fn update(&mut self, frame: &FrameData);
+
+    /// Get the render pipeline
+    fn pipeline(&self) -> &wgpu::RenderPipeline;
+
+    /// Get the bind group
+    fn bind_group(&self) -> &wgpu::BindGroup;
+
+    /// Handle resize
+    fn resize(&mut self, width: u32, height: u32);
+
+    /// Reload configuration
+    fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()>;
+
+    /// Get module name
+    fn name(&self) -> &str;
+}
+
+/// Hyperbolic mosaic wallpaper module (the {7,3} tiling)
+pub struct HyperbolicModule {
+    config: HyperbolicConfig,
+    pipeline: Option<wgpu::RenderPipeline>,
+    bind_group: Option<wgpu::BindGroup>,
+    uniform_buffer: Option<wgpu::Buffer>,
+    width: u32,
+    height: u32,
+    pan_angle: f64,
+    palette: Vec<[f32; 4]>,
+}
+
+impl HyperbolicModule {
+    pub fn new(config: &HyperbolicConfig) -> Result<Self> {
+        // Parse palette
+        let palette = Self::parse_palette(&config.palette)?;
+
+        Ok(Self {
+            config: config.clone(),
+            pipeline: None,
+            bind_group: None,
+            uniform_buffer: None,
+            width: 0,
+            height: 0,
+            pan_angle: 0.0,
+            palette,
+        })
+    }
+
+    fn parse_palette(palette_config: &PaletteConfig) -> Result<Vec<[f32; 4]>> {
+        match palette_config {
+            PaletteConfig::Named(name) => {
+                // Built-in palettes
+                match name.as_str() {
+                    "default" | "noctalia" => Ok(vec![
+                        [0.05, 0.05, 0.15, 1.0],  // Deep background
+                        [0.15, 0.1, 0.3, 1.0],    // Dark accent
+                        [0.3, 0.2, 0.5, 1.0],     // Mid tone
+                        [0.6, 0.4, 0.8, 1.0],     // Light accent
+                        [0.9, 0.7, 1.0, 1.0],     // Highlight
+                    ]),
+                    "monochrome" => Ok(vec![
+                        [0.05, 0.05, 0.05, 1.0],
+                        [0.15, 0.15, 0.15, 1.0],
+                        [0.3, 0.3, 0.3, 1.0],
+                        [0.6, 0.6, 0.6, 1.0],
+                        [0.9, 0.9, 0.9, 1.0],
+                    ]),
+                    "solarized" => Ok(vec![
+                        [0.0, 0.17, 0.21, 1.0],   // base03
+                        [0.03, 0.21, 0.26, 1.0],  // base02
+                        [0.35, 0.43, 0.45, 1.0],  // base01
+                        [0.58, 0.63, 0.63, 1.0],  // base00
+                        [0.83, 0.85, 0.82, 1.0],  // base0
+                    ]),
+                    _ => Ok(vec![
+                        [0.05, 0.05, 0.15, 1.0],
+                        [0.15, 0.1, 0.3, 1.0],
+                        [0.3, 0.2, 0.5, 1.0],
+                        [0.6, 0.4, 0.8, 1.0],
+                        [0.9, 0.7, 1.0, 1.0],
+                    ]),
+                }
+            }
+            PaletteConfig::Custom(colors) => {
+                let mut palette = Vec::new();
+                for color in colors {
+                    let c = Self::parse_hex_color(color)?;
+                    palette.push(c);
+                }
+                if palette.is_empty() {
+                    anyhow::bail!("Custom palette must have at least one color");
+                }
+                Ok(palette)
+            }
+        }
+    }
+
+    fn parse_hex_color(hex: &str) -> Result<[f32; 4]> {
+        let hex = hex.trim_start_matches('#');
+        let (r, g, b, a) = match hex.len() {
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16)?;
+                let g = u8::from_str_radix(&hex[2..4], 16)?;
+                let b = u8::from_str_radix(&hex[4..6], 16)?;
+                (r, g, b, 255)
+            }
+            8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16)?;
+                let g = u8::from_str_radix(&hex[2..4], 16)?;
+                let b = u8::from_str_radix(&hex[4..6], 16)?;
+                let a = u8::from_str_radix(&hex[6..8], 16)?;
+                (r, g, b, a)
+            }
+            _ => anyhow::bail!("Invalid hex color: {}", hex),
+        };
+        Ok([
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ])
+    }
+}
+
+impl WallpaperModule for HyperbolicModule {
+    fn new(config: &HyperbolicConfig) -> Result<Self> {
+        Self::new(config)
+    }
+
+    fn update(&mut self, frame: &FrameData) {
+        // Update pan angle based on camera movement and time
+        self.pan_angle += self.config.pan_rate * (1.0 / 60.0); // Approximate dt
+        
+        // Could also incorporate camera delta for parallax
+        let camera_delta = (frame.camera.0 - 0.0).abs() + (frame.camera.1 - 0.0).abs();
+        self.pan_angle += camera_delta * 0.001;
+    }
+
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline.as_ref().unwrap()
+    }
+
+    fn bind_group(&self) -> &wgpu::BindGroup {
+        self.bind_group.as_ref().unwrap()
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+        // Pipeline will be recreated on next render
+        self.pipeline = None;
+    }
+
+    fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()> {
+        self.config = modules.hyperbolic.clone();
+        self.palette = Self::parse_palette(&self.config.palette)?;
+        self.pipeline = None; // Force recreation
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "hyperbolic"
+    }
+}
+
+impl HyperbolicModule {
+    fn create_pipeline(&mut self, device: &wgpu::Device, surface_format: wgpu::TextureFormat, width: u32, height: u32) -> Result<()> {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Hyperbolic Wallpaper Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/hyperbolic.wgsl").into()),
+        });
+
+        // Create uniform buffer
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hyperbolic Uniforms"),
+            size: std::mem::size_of::<HyperbolicUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create bind group layout
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Hyperbolic Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Create bind group
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Hyperbolic Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        // Create pipeline layout
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Hyperbolic Pipeline Layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        // Create render pipeline
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Hyperbolic Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        self.pipeline = Some(pipeline);
+        self.bind_group = Some(bind_group);
+        self.uniform_buffer = Some(uniform_buffer);
+        self.width = width;
+        self.height = height;
+
+        Ok(())
+    }
+
+    fn update_uniforms(&mut self, renderer: &Renderer, frame: &FrameData) -> Result<()> {
+        let queue = renderer.queue();
+        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
+
+        let uniforms = HyperbolicUniforms {
+            resolution: [frame.width as f32, frame.height as f32],
+            camera: [frame.camera.0 as f32, frame.camera.1 as f32],
+            zoom: frame.zoom as f32,
+            time: frame.time as f32,
+            pan_angle: self.pan_angle as f32,
+            pan_rate: self.config.pan_rate as f32,
+            rmax: self.config.rmax as f32,
+            palette_colors: self.palette_to_array(),
+            palette_size: self.palette.len() as u32,
+            _padding: [0; 3],
+        };
+
+        queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        Ok(())
+    }
+
+    fn palette_to_array(&self) -> [[f32; 4]; 16] {
+        let mut arr = [[0.0, 0.0, 0.0, 1.0]; 16];
+        for (i, color) in self.palette.iter().enumerate().take(16) {
+            arr[i] = *color;
+        }
+        arr
+    }
+}
+
+/// Solid color wallpaper module
+pub struct SolidModule {
+    color: [f32; 4],
+    pipeline: Option<wgpu::RenderPipeline>,
+    bind_group: Option<wgpu::BindGroup>,
+    uniform_buffer: Option<wgpu::Buffer>,
+}
+
+impl SolidModule {
+    pub fn new(config: &crate::config::SolidConfig) -> Result<Self> {
+        let color = Self::parse_hex_color(&config.color)?;
+        Ok(Self {
+            color,
+            pipeline: None,
+            bind_group: None,
+            uniform_buffer: None,
+        })
+    }
+
+    fn parse_hex_color(hex: &str) -> Result<[f32; 4]> {
+        let hex = hex.trim_start_matches('#');
+        let (r, g, b, a) = match hex.len() {
+            6 => {
+                let r = u8::from_str_radix(&hex[0..2], 16)?;
+                let g = u8::from_str_radix(&hex[2..4], 16)?;
+                let b = u8::from_str_radix(&hex[4..6], 16)?;
+                (r, g, b, 255)
+            }
+            8 => {
+                let r = u8::from_str_radix(&hex[0..2], 16)?;
+                let g = u8::from_str_radix(&hex[2..4], 16)?;
+                let b = u8::from_str_radix(&hex[4..6], 16)?;
+                let a = u8::from_str_radix(&hex[6..8], 16)?;
+                (r, g, b, a)
+            }
+            _ => anyhow::bail!("Invalid hex color: {}", hex),
+        };
+        Ok([
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        ])
+    }
+}
+
+impl WallpaperModule for SolidModule {
+    fn new(_config: &HyperbolicConfig) -> Result<Self> {
+        // This won't be called directly, use SolidModule::new(&config.solid)
+        anyhow::bail!("Use SolidModule::new with SolidConfig")
+    }
+
+    fn update(&mut self, _frame: &FrameData) {}
+
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline.as_ref().unwrap()
+    }
+
+    fn bind_group(&self) -> &wgpu::BindGroup {
+        self.bind_group.as_ref().unwrap()
+    }
+
+    fn resize(&mut self, _width: u32, _height: u32) {
+        self.pipeline = None;
+    }
+
+    fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()> {
+        self.color = Self::parse_hex_color(&modules.solid.color)?;
+        self.pipeline = None;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "solid"
+    }
+}
+
+impl SolidModule {
+    fn create_pipeline(&mut self, device: &wgpu::Device, surface_format: wgpu::TextureFormat) -> Result<()> {
+        
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Solid Color Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/solid.wgsl").into()),
+        });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Solid Uniforms"),
+            size: std::mem::size_of::<SolidUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Solid Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Solid Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Solid Pipeline Layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Solid Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        self.pipeline = Some(pipeline);
+        self.bind_group = Some(bind_group);
+        self.uniform_buffer = Some(uniform_buffer);
+
+        Ok(())
+    }
+
+    fn update_uniforms(&mut self, renderer: &Renderer) -> Result<()> {
+        let queue = renderer.queue();
+        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
+
+        let uniforms = SolidUniforms { color: self.color };
+        queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
+        Ok(())
+    }
+}
+
+/// Image wallpaper module
+pub struct ImageModule {
+    config: crate::config::ImageConfig,
+    pipeline: Option<wgpu::RenderPipeline>,
+    bind_group: Option<wgpu::BindGroup>,
+    texture: Option<wgpu::Texture>,
+    sampler: Option<wgpu::Sampler>,
+}
+
+impl ImageModule {
+    pub fn new(config: &crate::config::ImageConfig) -> Result<Self> {
+        Ok(Self {
+            config: config.clone(),
+            pipeline: None,
+            bind_group: None,
+            texture: None,
+            sampler: None,
+        })
+    }
+}
+
+impl WallpaperModule for ImageModule {
+    fn new(_config: &HyperbolicConfig) -> Result<Self> {
+        anyhow::bail!("Use ImageModule::new with ImageConfig")
+    }
+
+    fn update(&mut self, _frame: &FrameData) {}
+
+    fn pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline.as_ref().unwrap()
+    }
+
+    fn bind_group(&self) -> &wgpu::BindGroup {
+        self.bind_group.as_ref().unwrap()
+    }
+
+    fn resize(&mut self, _width: u32, _height: u32) {
+        self.pipeline = None;
+    }
+
+    fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()> {
+        self.config = modules.image.clone();
+        self.pipeline = None;
+        self.texture = None;
+        Ok(())
+    }
+
+    fn name(&self) -> &str {
+        "image"
+    }
+}
+
+impl ImageModule {
+    fn create_pipeline(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, surface_format: wgpu::TextureFormat) -> Result<()> {
+        // Load image if path provided
+        if let Some(path) = &self.config.path {
+            let image = image::open(path)?.to_rgba8();
+            let dimensions = image.dimensions();
+            
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Wallpaper Image"),
+                size: wgpu::Extent3d {
+                    width: dimensions.0,
+                    height: dimensions.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &image,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * dimensions.0),
+                    rows_per_image: Some(dimensions.1),
+                },
+                wgpu::Extent3d {
+                    width: dimensions.0,
+                    height: dimensions.1,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+                address_mode_u: wgpu::AddressMode::ClampToEdge,
+                address_mode_v: wgpu::AddressMode::ClampToEdge,
+                address_mode_w: wgpu::AddressMode::ClampToEdge,
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            });
+
+            let texture_view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+            let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("Image Bind Group Layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Image Bind Group"),
+                layout: &bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&texture_view) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&sampler) },
+                ],
+            });
+
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Image Pipeline Layout"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("Image Shader"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image.wgsl").into()),
+            });
+
+            let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Image Render Pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: surface_format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    unclipped_depth: false,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+            self.pipeline = Some(pipeline);
+            self.bind_group = Some(bind_group);
+            self.texture = Some(texture);
+            self.sampler = Some(sampler);
+        }
+
+        Ok(())
+    }
+}

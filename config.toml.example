@@ -1,0 +1,59 @@
+# driftwm-wallpaper configuration
+# Copy this to ~/.config/driftwm-wallpaper/config.toml or /etc/driftwm-wallpaper/config.toml
+
+# Wallpaper module to use: "hyperbolic", "solid", "image"
+module = "hyperbolic"
+
+# Module-specific configurations
+[modules.hyperbolic]
+# Pan rate in radians per second
+pan_rate = 0.15
+# Maximum radius for the tiling
+rmax = 3.5
+# Color palette: named ("default", "monochrome", "solarized", "noctalia") or custom array of hex colors
+palette = { type = "named", value = "noctalia" }
+# Enable mouse interaction (parallax)
+interactive = true
+# Custom shader path (optional, uses built-in if not set)
+# shader_path = "~/.config/driftwm-wallpaper/custom.wgsl"
+
+[modules.solid]
+# Solid color in hex format (#RRGGBB or #RRGGBBAA)
+color = "#1a1a2e"
+
+[modules.image]
+# Path to image file
+# path = "~/Pictures/wallpaper.jpg"
+# Fit mode: "cover", "contain", "fill", "center", "tile"
+fit = "cover"
+
+# Layer shell configuration
+[layer]
+# Layer namespace (for debugging/identification)
+namespace = "driftwm-wallpaper"
+# Z-order (lower = further back, negative = behind everything)
+z_order = -100
+# Output name to target (empty = all outputs)
+output = ""
+# Anchors (edges to attach to)
+anchors = ["top", "bottom", "left", "right"]
+# Exclusive zone (0 = no reservation, >0 = reserve space for panels)
+exclusive_zone = 0
+
+# Rendering configuration
+[render]
+# Target FPS (0 = unlimited/vsync)
+fps = 60
+# Enable vsync
+vsync = true
+# Power preference: "low" or "high"
+power_preference = "high"
+
+# Theme integration (Noctalia)
+[theme]
+# Enable theme subscription
+enable = true
+# Theme socket path (empty = auto-detect)
+socket = ""
+# Palette key to use from theme
+palette_key = "background"

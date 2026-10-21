@@ -1,0 +1,48 @@
+[package]
+name = "driftwm-wallpaper"
+version = "0.1.0"
+edition = "2021"
+description = "External wallpaper system for driftwm via IPC"
+
+[dependencies]
+# Core
+tokio = { version = "1", features = ["full", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+clap = { version = "4", features = ["derive"] }
+
+# IPC - reuse driftwm's protocol types
+# We'll copy the protocol structs locally to avoid depending on driftwm as a library
+
+# Wayland client for layer-shell
+smithay-client-toolkit = { version = "0.21", features = ["default", "calloop"] }
+wayland-client = "0.31"
+wayland-protocols = "0.31"
+wayland-protocols-wlr = "0.3"
+
+# Graphics
+wgpu = { version = "30", features = ["wgsl", "drm"] }
+raw-window-handle = { version = "0.6", features = ["std"] }
+
+# Config
+config = "0.14"
+toml = "0.8"
+
+# Image loading
+image = "0.25"
+
+# Binary serialization for uniforms
+bytemuck = { version = "1", features = ["derive"] }
+
+# Cross-thread channels
+crossbeam = "0.8"
+
+# Event loop for Wayland
+calloop = { version = "0.14", features = ["futures-io"] }
+
+# Directories for config paths
+dirs = "5"
