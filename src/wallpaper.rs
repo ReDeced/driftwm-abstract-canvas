@@ -149,6 +149,7 @@ impl WallpaperManager {
 
     /// Render a frame and present via SHM
     pub async fn render_frame(&mut self, layer: &mut layer_shell::LayerShell, width: u32, height: u32) -> Result<()> {
+        tracing::info!("render_frame: {}x{}, frame_count={}", width, height, self.state.frame_count);
         self.state.frame_count += 1;
         self.state.time = self.state.frame_count as f64 / 60.0; // Approximate
 

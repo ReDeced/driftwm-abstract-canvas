@@ -143,6 +143,7 @@ impl LayerShell {
         if let Some(ref ls) = data.layer_surface {
             ls.wl_surface().commit();
         }
+        let _ = connection.flush();
 
         Ok(Self {
             connection,
@@ -167,6 +168,16 @@ impl LayerShell {
         self.event_rx.try_recv().ok()
     }
 
+    /// Current surface width
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    /// Current surface height
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
     /// Run one iteration of the event loop (non-blocking)
     pub fn dispatch_pending(&mut self) -> Result<()> {
         self.event_queue.dispatch_pending(&mut self.data)?;
@@ -180,6 +191,7 @@ impl LayerShell {
                 smithay_client_toolkit::compositor::FrameCallbackData(surface.wl_surface().clone()));
             surface.wl_surface().commit();
         }
+        let _ = self.connection.flush();
     }
 
     /// Acknowledge configure
@@ -187,10 +199,12 @@ impl LayerShell {
         if let Some(surface) = &self.layer_surface {
             surface.wl_surface().commit();
         }
+        let _ = self.connection.flush();
     }
 
     /// Present a frame (RGBA pixels) via SHM
     pub fn present_shm(&mut self, pixels: Vec<u8>, width: u32, height: u32) -> Result<()> {
+        tracing::info!("present_shm: {}x{}, pixels={}", width, height, pixels.len());
         if pixels.len() != (width * height * 4) as usize {
             anyhow::bail!("Invalid pixel data size: expected {}, got {}", width * height * 4, pixels.len());
         }
@@ -222,6 +236,7 @@ impl LayerShell {
             surface.wl_surface().damage_buffer(0, 0, width as i32, height as i32);
             surface.wl_surface().commit();
         }
+        let _ = self.connection.flush();
 
         self.width = width;
         self.height = height;
@@ -465,6 +480,7 @@ impl CompositorHandler for LayerShellData {
         _surface: &WlSurface,
         _time: u32,
     ) {
+        tracing::info!("Wayland frame callback: {}x{}", self.width, self.height);
         let _ = self.event_tx.send(LayerEvent::RedrawRequested {
             width: self.width,
             height: self.height,
@@ -522,8 +538,11 @@ impl LayerShellHandler for LayerShellData {
         configure: LayerSurfaceConfigure,
         _serial: u32,
     ) {
-        self.width = if configure.new_size.0 == 0 { self.width } else { configure.new_size.0 };
-        self.height = if configure.new_size.1 == 0 { self.height } else { configure.new_size.1 };
+        let new_w = if configure.new_size.0 == 0 { self.width } else { configure.new_size.0 };
+        let new_h = if configure.new_size.1 == 0 { self.height } else { configure.new_size.1 };
+        tracing::info!("Wayland configure: {}x{} (serial {})", new_w, new_h, _serial);
+        self.width = new_w;
+        self.height = new_h;
         let _ = self.event_tx.send(LayerEvent::Configure {
             width: self.width,
             height: self.height,

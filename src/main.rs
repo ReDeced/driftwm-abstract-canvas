@@ -65,7 +65,10 @@ async fn main() -> Result<()> {
 
     // Create layer-shell surface with SHM presentation
     let mut layer = layer_shell::LayerShell::new(&wallpaper.config().layer).await?;
-    info!("Layer shell surface created");
+    info!("Layer shell surface created (size: {}x{})", layer.width(), layer.height());
+
+    // Request initial redraw to kick off the render loop
+    layer.request_redraw();
 
     // Main event loop
     loop {
@@ -76,14 +79,19 @@ async fn main() -> Result<()> {
         }
 
         // Check for layer shell events (process all pending)
+        let mut wayland_events = 0;
         loop {
             match layer.try_next_event() {
                 Some(layer_shell::LayerEvent::RedrawRequested { width, height }) => {
+                    wayland_events += 1;
+                    tracing::info!("Wayland RedrawRequested #{} ({}x{})", wayland_events, width, height);
                     if let Err(e) = wallpaper.render_frame(&mut layer, width, height).await {
                         error!("Render error: {}", e);
                     }
                 }
                 Some(layer_shell::LayerEvent::Configure { width, height }) => {
+                    wayland_events += 1;
+                    tracing::info!("Wayland Configure #{} ({}x{})", wayland_events, width, height);
                     wallpaper.resize(width, height);
                     layer.ack_configure();
                     // Request first frame so the compositor sends us a frame callback
@@ -95,6 +103,9 @@ async fn main() -> Result<()> {
                 }
                 None => break,
             }
+        }
+        if wayland_events > 0 {
+            tracing::info!("Processed {} Wayland events this iteration", wayland_events);
         }
 
         // Handle IPC events (with timeout to allow processing layer events)
