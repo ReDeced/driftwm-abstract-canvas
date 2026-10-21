@@ -80,6 +80,7 @@ impl Default for HyperbolicConfig {
 fn default_pan_rate() -> f64 { 0.15 }
 fn default_rmax() -> f64 { 3.5 }
 fn default_true() -> bool { true }
+fn default_false() -> bool { false }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SolidConfig {
@@ -239,8 +240,8 @@ impl Default for RenderConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ThemeConfig {
-    /// Enable Noctalia theme subscription
-    #[serde(default = "default_true")]
+    /// Enable Noctalia theme subscription (optional — disabled by default)
+    #[serde(default = "default_false")]
     pub enable: bool,
     /// Theme socket path (empty = auto-detect)
     #[serde(default)]

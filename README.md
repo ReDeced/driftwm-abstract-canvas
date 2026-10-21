@@ -1,5 +1,7 @@
 # driftwm-abstract-canvas
 
+**[Русский](README.ru.md)** | English
+
 External wallpaper system for [driftwm](https://github.com/roman/driftwm) via IPC.
 
 A standalone wallpaper application that communicates with driftwm through its IPC socket, providing flexible, GPU-accelerated wallpapers with live camera/zoom synchronization.
@@ -9,11 +11,13 @@ A standalone wallpaper application that communicates with driftwm through its IP
 - **IPC Integration**: Communicates with driftwm via Unix socket for real-time camera/zoom state
 - **GPU Accelerated**: Uses wgpu for hardware-accelerated rendering
 - **Multiple Modules**: 
-  - **Hyperbolic**: {7,3} tiling with animated pan and customizable palettes
+  - **Hyperbolic**: {7,3} tiling with animated pan and customizable palettes (negative curvature)
   - **Solid**: Simple solid color background
   - **Image**: Image wallpaper with fit modes (cover, contain, fill, center, tile)
+  - **Spherical**: Positive-curvature (elliptic) tiling on a sphere — cells converge toward the poles and the space wraps around itself
 - **Hot Reload**: Configuration changes apply without restart
-- **Theme Integration**: Subscribes to Noctalia theme for automatic palette updates
+- **Smooth Palette Transitions**: Colors fade smoothly when switching palettes (no abrupt jumps)
+- **Theme Integration**: Optional Noctalia theme subscription for automatic palette updates (disabled by default)
 - **Layer Shell**: Renders as a Wayland layer-shell surface at the background layer
 
 ## Installation
@@ -73,8 +77,11 @@ vsync = true
 power_preference = "high"
 
 [theme]
-enable = true
+# Enable theme subscription (optional, disabled by default)
+enable = false
+# Theme socket path (empty = auto-detect)
 socket = ""
+# Palette key to use from theme
 palette_key = "background"
 ```
 
@@ -95,6 +102,44 @@ driftwm-abstract-canvas --dump-state
 
 # Override module
 driftwm-abstract-canvas -m solid
+```
+
+## Spherical Module (Positive Curvature)
+
+The `spherical` module renders a tiling on the surface of a sphere using orthographic projection. Unlike the hyperbolic disk (negative curvature, open space), the sphere has **positive curvature**: space is closed, cells converge toward the poles, and the pattern wraps around itself.
+
+### Template example
+
+Add this to your `config.toml` for a Noctalia-inspired spherical wallpaper:
+
+```toml
+module = "spherical"
+
+[modules.spherical]
+# Radius of the sphere (positive curvature)
+radius = 1.0
+# Animation speed in radians per second
+pan_rate = 0.15
+# Palette: named ("default", "monochrome", "solarized", "sphere") or custom hex array
+palette = { type = "named", value = "sphere" }
+# Enable mouse parallax interaction
+interactive = true
+
+[layer]
+namespace = "driftwm-abstract-canvas"
+z_order = -100
+```
+
+Run with:
+
+```bash
+driftwm-abstract-canvas -m spherical
+```
+
+Or override at runtime:
+
+```bash
+./target/release/driftwm-abstract-canvas -m spherical
 ```
 
 ## Integration with driftwm
@@ -162,6 +207,36 @@ GPL-3.0-or-later - see [LICENSE](LICENSE) for details.
 3. Make your changes
 4. Run tests: `cargo test`
 5. Submit a pull request
+
+## Capturing Examples for README
+
+To add real screenshots or GIFs of each module to this README, run driftwm under Wayland (e.g., in a nested compositor like `wayfire` or `weston`), then capture:
+
+```bash
+# Start driftwm-abstract-canvas with a specific module
+./target/release/driftwm-abstract-canvas -m hyperbolic
+./target/release/driftwm-abstract-canvas -m spherical
+./target/release/driftwm-abstract-canvas -m solid
+./target/release/driftwm-abstract-canvas -m image -c path/to/image.toml
+
+# Capture a screenshot (requires grim/swaygrim or similar)
+grim -o <output> screenshot_<module>.png
+
+# Capture a short GIF/MP4 (requires wf-recorder or similar)
+wf-recorder --output <output> -f demo_<module>.mp4 --duration 10
+```
+
+Place the resulting files under `docs/screenshots/` and reference them:
+
+```markdown
+![Hyperbolic module](docs/screenshots/hyperbolic.png)
+![Spherical module](docs/screenshots/spherical.png)
+```
+
+Recommended capture settings:
+- Resolution: 1920×1080 (or your primary output)
+- Duration: 8–12 seconds per module to show the animated pan
+- Include the palette transition: switch `palette` in config while running to demonstrate smooth color fading
 
 ## AI Disclosure
 

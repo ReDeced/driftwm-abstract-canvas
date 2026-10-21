@@ -61,10 +61,10 @@ vsync = true
 # Power preference: "low" or "high"
 power_preference = "high"
 
-# Theme integration (Noctalia)
+# Theme integration (Noctalia) — optional, disabled by default
 [theme]
 # Enable theme subscription
-enable = true
+enable = false
 # Theme socket path (empty = auto-detect)
 socket = ""
 # Palette key to use from theme

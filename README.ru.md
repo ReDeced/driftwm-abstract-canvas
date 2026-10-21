@@ -1,5 +1,7 @@
 # driftwm-abstract-canvas
 
+**[English](README.md)** | Русский
+
 Внешняя система обоев для [driftwm](https://github.com/roman/driftwm) через IPC.
 
 Отдельное приложение для обоев, которое общается с driftwm через его IPC-сокет, предоставляя гибкие, GPU-ускоренные обои с живой синхронизацией камеры и зума.
@@ -9,11 +11,13 @@
 - **IPC-интеграция**: Общается с driftwm через Unix-сокет для получения состояния камеры/зума в реальном времени
 - **GPU-ускорение**: Использует wgpu для аппаратного ускорения рендеринга
 - **Множество модулей**:
-  - **Hyperbolic**: Мозаика {7,3} с анимированным панорамированием и настраиваемыми палитрами
+  - **Hyperbolic**: Мозаика {7,3} с анимированным панорамированием и настраиваемыми палитрами (отрицательная кривизна)
   - **Solid**: Простой сплошной цвет фона
-  - **Image**: Объи из изображения с режимами подгонки (cover, contain, fill, center, tile)
+  - **Image**: Обои из изображения с режимами подгонки (cover, contain, fill, center, tile)
+  - **Spherical**: Обои с положительной (эллиптической) кривизной на сфере — клетки сходятся к полюсам, пространство замыкается на себя
 - **Горячая перезагрузка**: Изменения конфигурации применяются без перезапуска
-- **Интеграция с темами**: Подписывается на тему Noctalia для автоматического обновления палитры
+- **Плавные переходы цветов**: Цвета плавно перетекают друг в друга при смене палитры (без резких скачков)
+- **Интеграция с темами**: Опциональная подписка на тему Noctalia для автоматического обновления палитры (отключена по умолчанию)
 - **Layer Shell**: Рендерится как Wayland layer-shell поверхность на фоновом слое
 
 ## Установка
@@ -38,7 +42,7 @@ cargo build --release
 Скопируйте `config.toml.example` в `~/.config/driftwm-abstract-canvas/config.toml` или `/etc/driftwm-abstract-canvas/config.toml` и настройте:
 
 ```toml
-# Модуль обоев: "hyperbolic", "solid", "image"
+# Модуль обоев: "hyperbolic", "solid", "image", "spherical"
 module = "hyperbolic"
 
 [modules.hyperbolic]
@@ -54,6 +58,12 @@ color = "#1a1a2e"
 path = "~/Pictures/wallpaper.jpg"
 fit = "cover"
 
+[modules.spherical]
+radius = 1.0         # Радиус сферы (положительная кривизна)
+pan_rate = 0.15      # Радиан в секунду
+palette = { type = "named", value = "sphere" }
+interactive = true
+
 [layer]
 namespace = "driftwm-abstract-canvas"
 z_order = -100
@@ -67,7 +77,8 @@ vsync = true
 power_preference = "high"
 
 [theme]
-enable = true
+# Интеграция с темой Noctalia — опционально, выключена по умолчанию
+enable = false
 socket = ""
 palette_key = "background"
 ```
@@ -89,6 +100,44 @@ driftwm-abstract-canvas --dump-state
 
 # Переопределить модуль
 driftwm-abstract-canvas -m solid
+```
+
+## Сферическое пространство (положительная кривизна)
+
+Модуль `spherical` рисует мозаику на поверхности сферы с помощью ортографической проекции. В отличие от гиперболического диска (отрицательная кривизна, открытое пространство), сфера имеет **положительную кривизну**: пространство замкнуто, клетки сходятся к полюсам, а узор оборачивается вокруг себя.
+
+### Шаблонный пример
+
+Добавьте это в ваш `config.toml` для сферического обоя в стиле Noctalia:
+
+```toml
+module = "spherical"
+
+[modules.spherical]
+# Радиус сферы (положительная кривизна)
+radius = 1.0
+# Скорость анимации в радианах в секунду
+pan_rate = 0.15
+# Палитра: named ("default", "monochrome", "solarized", "sphere") или массив hex-цветов
+palette = { type = "named", value = "sphere" }
+# Включить параллакс при движении мыши
+interactive = true
+
+[layer]
+namespace = "driftwm-abstract-canvas"
+z_order = -100
+```
+
+Запуск:
+
+```bash
+driftwm-abstract-canvas -m spherical
+```
+
+Или переопределение модуля во время выполнения:
+
+```bash
+./target/release/driftwm-abstract-canvas -m spherical
 ```
 
 ## Интеграция с driftwm
@@ -148,6 +197,36 @@ pub trait WallpaperModule: Send + Sync {
 ## Лицензия
 
 GPL-3.0-or-later - подробности в [LICENSE](LICENSE).
+
+## Захват примеров для README
+
+Чтобы добавить реальные скриншоты или GIF каждого модуля в этот README, запустите driftwm под Wayland (например, во вложенном композиторе, такого как `wayfire` или `weston`), затем выполните захват:
+
+```bash
+# Запуск driftwm-abstract-canvas с конкретным модулем
+./target/release/driftwm-abstract-canvas -m hyperbolic
+./target/release/driftwm-abstract-canvas -m spherical
+./target/release/driftwm-abstract-canvas -m solid
+./target/release/driftwm-abstract-canvas -m image -c путь/к/image.toml
+
+# Захват скриншота (требуется grim/swaygrim или аналогичное)
+grim -o <вывод> screenshot_<модуль>.png
+
+# Захват короткого GIF/MP4 (требуется wf-recorder или аналогичное)
+wf-recorder --output <вывод> -f demo_<модуль>.mp4 --duration 10
+```
+
+Поместите полученные файлы в `docs/screenshots/` и укажите их в README:
+
+```markdown
+![Модуль Hyperbolic](docs/screenshots/hyperbolic.png)
+![Модуль Spherical](docs/screenshots/spherical.png)
+```
+
+Рекомендуемые настройки захвата:
+- Разрешение: 1920×1080 (или ваш основной вывод)
+- Длительность: 8–12 секунд на модуль, чтобы показать анимированное панорамирование
+- Включите переход палитры: переключите `palette` в конфиге во время работы, чтобы продемонстрировать плавное затухание цветов
 
 ## Участие в разработке
 

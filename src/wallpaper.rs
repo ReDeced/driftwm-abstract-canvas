@@ -235,6 +235,9 @@ pub struct HyperbolicModule {
     height: u32,
     pan_angle: f64,
     palette: Vec<[f32; 4]>,
+    target_palette: Vec<[f32; 4]>,
+    transition: f32,
+    transition_speed: f32,
 }
 
 impl HyperbolicModule {
@@ -250,7 +253,10 @@ impl HyperbolicModule {
             width: 0,
             height: 0,
             pan_angle: 0.0,
-            palette,
+            palette: palette.clone(),
+            target_palette: palette,
+            transition: 1.0,
+            transition_speed: 0.5,
         })
     }
 
@@ -342,6 +348,15 @@ impl WallpaperModule for HyperbolicModule {
         // Could also incorporate camera delta for parallax
         let camera_delta = (frame.camera.0 - 0.0).abs() + (frame.camera.1 - 0.0).abs();
         self.pan_angle += camera_delta * 0.001;
+
+        // Smooth palette transition when config changes
+        if self.transition < 1.0 {
+            self.transition = (self.transition + self.transition_speed * (1.0 / 60.0)).min(1.0);
+            let len = self.palette.len().min(self.target_palette.len());
+            for i in 0..len {
+                self.palette[i] = lerp_color(self.palette[i], self.target_palette[i], self.transition);
+            }
+        }
     }
 
     fn pipeline(&self) -> &wgpu::RenderPipeline {
@@ -361,7 +376,10 @@ impl WallpaperModule for HyperbolicModule {
 
     fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()> {
         self.config = modules.hyperbolic.clone();
-        self.palette = Self::parse_palette(&self.config.palette)?;
+        let new_palette = Self::parse_palette(&self.config.palette)?;
+        // Start smooth transition to new palette
+        self.target_palette = new_palette;
+        self.transition = 0.0;
         self.pipeline = None; // Force recreation
         Ok(())
     }
@@ -369,6 +387,16 @@ impl WallpaperModule for HyperbolicModule {
     fn name(&self) -> &str {
         "hyperbolic"
     }
+}
+
+/// Linear interpolation between two RGBA colors
+fn lerp_color(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+        a[3] + (b[3] - a[3]) * t,
+    ]
 }
 
 impl HyperbolicModule {
@@ -890,6 +918,9 @@ pub struct SphericalModule {
     height: u32,
     pan_angle: f32,
     palette: Vec<[f32; 4]>,
+    target_palette: Vec<[f32; 4]>,
+    transition: f32,
+    transition_speed: f32,
 }
 
 impl SphericalModule {
@@ -904,7 +935,10 @@ impl SphericalModule {
             width: 0,
             height: 0,
             pan_angle: 0.0,
-            palette,
+            palette: palette.clone(),
+            target_palette: palette,
+            transition: 1.0,
+            transition_speed: 0.5,
         })
     }
 
@@ -1002,6 +1036,15 @@ impl WallpaperModule for SphericalModule {
         self.pan_angle += self.config.pan_rate * (1.0 / 60.0);
         let camera_delta = (frame.camera.0.abs() + frame.camera.1.abs()) as f32 * 0.001;
         self.pan_angle += camera_delta;
+
+        // Smooth palette transition when config changes
+        if self.transition < 1.0 {
+            self.transition = (self.transition + self.transition_speed * (1.0 / 60.0)).min(1.0);
+            let len = self.palette.len().min(self.target_palette.len());
+            for i in 0..len {
+                self.palette[i] = lerp_color(self.palette[i], self.target_palette[i], self.transition);
+            }
+        }
     }
 
     fn pipeline(&self) -> &wgpu::RenderPipeline {
@@ -1018,7 +1061,9 @@ impl WallpaperModule for SphericalModule {
 
     fn reload_config(&mut self, modules: &ModuleConfigs) -> Result<()> {
         self.config = modules.spherical.clone();
-        self.palette = Self::parse_palette(&self.config.palette)?;
+        let new_palette = Self::parse_palette(&self.config.palette)?;
+        self.target_palette = new_palette;
+        self.transition = 0.0;
         self.pipeline = None;
         Ok(())
     }
