@@ -101,15 +101,14 @@ fn fs_main(@builtin(position) frag_coord: vec4<f32>) -> @location(0) vec4<f32> {
     let cell_center = 1.0 - smoothstep(0.0, 0.04, min_dist);
 
     let lit = mix(base_color, vec4<f32>(1.0, 1.0, 1.0, 1.0) * base_color, cell_edge * 0.35);
-    let mut color = mix(vec4<f32>(0.0), lit, cell_center);
+    let color = mix(vec4<f32>(0.0), lit, cell_center);
 
     // Subtle animation pulse
     let pulse = sin(uniforms.time * 0.6 + min_dist * 25.0) * 0.02;
-    color.rgb += pulse;
 
     // Vignette toward the sphere limb
     let vignette = smoothstep(0.85, 1.0, r);
-    color.rgb *= 1.0 - vignette * 0.4;
+    let rgb = color.rgb * (1.0 - vignette * 0.4) + vec3<f32>(pulse, pulse, pulse);
 
-    return color;
+    return vec4<f32>(rgb, color.a);
 }

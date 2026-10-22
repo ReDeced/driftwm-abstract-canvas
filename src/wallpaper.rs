@@ -4,7 +4,7 @@ use crate::config::{AppConfig, HyperbolicConfig, ModuleConfigs, PaletteConfig, S
 use crate::ipc::StateInfo;
 use crate::renderer::{Renderer, FrameData, OutputState, WindowState};
 use crate::layer_shell;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use std::sync::Arc;
 use tracing::{info, debug};
 
@@ -13,8 +13,13 @@ use tracing::{info, debug};
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct HyperbolicUniforms {
     resolution: [f32; 2],
-    _pad1: u32,
-    _pad2: u32,
+    camera: [f32; 2],
+    zoom: f32,
+    time: f32,
+    pan_angle: f32,
+    pan_rate: f32,
+    rmax: f32,
+    _padding: [u32; 3],
 }
 
 /// Uniforms for solid color shader
@@ -164,6 +169,9 @@ impl WallpaperManager {
         // Ensure pipeline exists (created lazily on first render or after resize)
         self.current_module.ensure_pipeline(&self.renderer)?;
 
+        // Upload per-frame uniforms before drawing
+        self.current_module.update_uniforms(&self.renderer, &frame_data)?;
+
         // Get pipeline and bind group from module
         let pipeline = self.current_module.pipeline();
         let bind_group = self.current_module.bind_group();
@@ -171,9 +179,8 @@ impl WallpaperManager {
         // Render to offscreen texture
         self.renderer.begin_render_pass(pipeline, bind_group)?;
 
-        // Copy to CPU - TEMPORARILY DISABLED (validation error)
-        // let pixels = self.renderer.copy_to_cpu()?;
-        let pixels = vec![0u8; (width * height * 4) as usize];
+        // Copy to CPU
+        let pixels = self.renderer.copy_to_cpu()?;
 
         // Present via SHM
         layer.present_shm(pixels, width, height)?;
@@ -210,6 +217,9 @@ pub trait WallpaperModule: Send + Sync {
     /// Ensure the render pipeline exists (create if needed, e.g. after resize)
     fn ensure_pipeline(&mut self, renderer: &Renderer) -> Result<()>;
 
+    /// Write per-frame uniform data (called after ensure_pipeline, before draw)
+    fn update_uniforms(&mut self, renderer: &Renderer, frame: &FrameData) -> Result<()>;
+
     /// Get the render pipeline
     fn pipeline(&self) -> &wgpu::RenderPipeline;
 
@@ -231,6 +241,7 @@ pub struct HyperbolicModule {
     config: HyperbolicConfig,
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group: Option<wgpu::BindGroup>,
+    uniform_buffer: Option<wgpu::Buffer>,
     width: u32,
     height: u32,
     pan_angle: f64,
@@ -249,6 +260,7 @@ impl HyperbolicModule {
             config: config.clone(),
             pipeline: None,
             bind_group: None,
+            uniform_buffer: None,
             width: 0,
             height: 0,
             pan_angle: 0.0,
@@ -373,6 +385,10 @@ impl WallpaperModule for HyperbolicModule {
         Ok(())
     }
 
+    fn update_uniforms(&mut self, renderer: &Renderer, frame: &FrameData) -> Result<()> {
+        self.write_uniforms(renderer, frame)
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -412,17 +428,41 @@ impl HyperbolicModule {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/hyperbolic.wgsl").into()),
         });
 
-        // Create empty bind group layout (no bindings needed)
-        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("Hyperbolic Bind Group Layout"),
-            entries: &[],
+        // Create uniform buffer (shader declares @group(0) @binding(0) uniform)
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Hyperbolic Uniforms"),
+            size: 48, // sizeof(Uniforms) = 40, rounded to 16-byte alignment
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
         });
 
-        // Create empty bind group
+        // Create bind group layout matching the shader's uniform declaration
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Hyperbolic Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: Some(std::num::NonZeroU64::new(40).unwrap()),
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        // Create bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Hyperbolic Bind Group"),
             layout: &bind_group_layout,
-            entries: &[],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
         });
 
         // Create pipeline layout
@@ -469,9 +509,27 @@ impl HyperbolicModule {
 
         self.pipeline = Some(pipeline);
         self.bind_group = Some(bind_group);
+        self.uniform_buffer = Some(uniform_buffer);
         self.width = width;
         self.height = height;
 
+        Ok(())
+    }
+
+    /// Write per-frame uniform data into the uniform buffer
+    fn write_uniforms(&mut self, renderer: &Renderer, frame: &FrameData) -> Result<()> {
+        let uniform_buffer = self.uniform_buffer.as_ref().context("No uniform buffer")?;
+        let uniforms = HyperbolicUniforms {
+            resolution: [frame.width as f32, frame.height as f32],
+            camera: [frame.camera.0 as f32, frame.camera.1 as f32],
+            zoom: frame.zoom as f32,
+            time: frame.time as f32,
+            pan_angle: self.pan_angle as f32,
+            pan_rate: self.config.pan_rate as f32,
+            rmax: self.config.rmax as f32,
+            _padding: [0; 3],
+        };
+        renderer.queue().write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
         Ok(())
     }
 
@@ -549,6 +607,13 @@ impl WallpaperModule for SolidModule {
         if self.pipeline.is_none() {
             self.create_pipeline(renderer.device(), renderer.surface_format())?;
         }
+        Ok(())
+    }
+
+    fn update_uniforms(&mut self, renderer: &Renderer, _frame: &FrameData) -> Result<()> {
+        let uniform_buffer = self.uniform_buffer.as_ref().context("No uniform buffer")?;
+        let uniforms = SolidUniforms { color: self.color };
+        renderer.queue().write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
         Ok(())
     }
 
@@ -655,15 +720,6 @@ impl SolidModule {
 
         Ok(())
     }
-
-    fn update_uniforms(&mut self, renderer: &Renderer) -> Result<()> {
-        let queue = renderer.queue();
-        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
-
-        let uniforms = SolidUniforms { color: self.color };
-        queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
-        Ok(())
-    }
 }
 
 /// Image wallpaper module
@@ -707,6 +763,10 @@ impl WallpaperModule for ImageModule {
             self.create_pipeline(renderer.device(), renderer.queue(), renderer.surface_format())?;
         }
         Ok(())
+    }
+
+    fn update_uniforms(&mut self, _renderer: &Renderer, _frame: &FrameData) -> Result<()> {
+        Ok(()) // Image module binds texture+sampler, no uniform buffer
     }
 
     fn resize(&mut self, _width: u32, _height: u32) {
@@ -1089,6 +1149,14 @@ impl SphericalModule {
 
         Ok(())
     }
+
+    fn palette_to_array(&self) -> [[f32; 4]; 32] {
+        let mut arr = [[0.0, 0.0, 0.0, 1.0]; 32];
+        for (i, color) in self.palette.iter().enumerate().take(32) {
+            arr[i] = *color;
+        }
+        arr
+    }
 }
 
 impl WallpaperModule for SphericalModule {
@@ -1123,6 +1191,26 @@ impl WallpaperModule for SphericalModule {
         if self.pipeline.is_none() {
             self.create_pipeline(renderer.device(), renderer.surface_format(), self.width, self.height)?;
         }
+        Ok(())
+    }
+
+    fn update_uniforms(&mut self, renderer: &Renderer, frame: &FrameData) -> Result<()> {
+        let uniform_buffer = self.uniform_buffer.as_ref().context("No uniform buffer")?;
+        let uniforms = SphericalUniforms {
+            resolution: [frame.width as f32, frame.height as f32],
+            camera: [frame.camera.0 as f32, frame.camera.1 as f32],
+            zoom: frame.zoom as f32,
+            time: frame.time as f32,
+            pan_angle: self.pan_angle,
+            pan_rate: self.config.pan_rate,
+            radius: self.config.radius,
+            _padding1: [0; 3],
+            palette_colors: self.palette_to_array(),
+            palette_size: self.palette.len() as u32,
+            mode: 0,
+            _padding2: [0; 2],
+        };
+        renderer.queue().write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
         Ok(())
     }
 
