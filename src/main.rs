@@ -72,6 +72,12 @@ async fn main() -> Result<()> {
 
     // Main event loop
     loop {
+        // Read pending Wayland events from the socket
+        if let Err(e) = layer.read_events() {
+            error!("Wayland read error: {}", e);
+            break;
+        }
+
         // Process pending Wayland events (non-blocking)
         if let Err(e) = layer.dispatch_pending() {
             error!("Layer shell dispatch error: {}", e);

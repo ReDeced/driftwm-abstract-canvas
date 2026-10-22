@@ -13,15 +13,8 @@ use tracing::{info, debug};
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 struct HyperbolicUniforms {
     resolution: [f32; 2],
-    camera: [f32; 2],
-    zoom: f32,
-    time: f32,
-    pan_angle: f32,
-    pan_rate: f32,
-    rmax: f32,
-    palette_colors: [[f32; 4]; 16],
-    palette_size: u32,
-    _padding: [u32; 3],
+    _pad1: u32,
+    _pad2: u32,
 }
 
 /// Uniforms for solid color shader
@@ -168,6 +161,9 @@ impl WallpaperManager {
         // Let the module update its internal state
         self.current_module.update(&frame_data);
 
+        // Ensure pipeline exists (created lazily on first render or after resize)
+        self.current_module.ensure_pipeline(&self.renderer)?;
+
         // Get pipeline and bind group from module
         let pipeline = self.current_module.pipeline();
         let bind_group = self.current_module.bind_group();
@@ -175,8 +171,9 @@ impl WallpaperManager {
         // Render to offscreen texture
         self.renderer.begin_render_pass(pipeline, bind_group)?;
 
-        // Copy to CPU
-        let pixels = self.renderer.copy_to_cpu()?;
+        // Copy to CPU - TEMPORARILY DISABLED (validation error)
+        // let pixels = self.renderer.copy_to_cpu()?;
+        let pixels = vec![0u8; (width * height * 4) as usize];
 
         // Present via SHM
         layer.present_shm(pixels, width, height)?;
@@ -210,6 +207,9 @@ pub trait WallpaperModule: Send + Sync {
     /// Update internal state from frame data
     fn update(&mut self, frame: &FrameData);
 
+    /// Ensure the render pipeline exists (create if needed, e.g. after resize)
+    fn ensure_pipeline(&mut self, renderer: &Renderer) -> Result<()>;
+
     /// Get the render pipeline
     fn pipeline(&self) -> &wgpu::RenderPipeline;
 
@@ -231,7 +231,6 @@ pub struct HyperbolicModule {
     config: HyperbolicConfig,
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group: Option<wgpu::BindGroup>,
-    uniform_buffer: Option<wgpu::Buffer>,
     width: u32,
     height: u32,
     pan_angle: f64,
@@ -250,7 +249,6 @@ impl HyperbolicModule {
             config: config.clone(),
             pipeline: None,
             bind_group: None,
-            uniform_buffer: None,
             width: 0,
             height: 0,
             pan_angle: 0.0,
@@ -368,6 +366,13 @@ impl WallpaperModule for HyperbolicModule {
         self.bind_group.as_ref().unwrap()
     }
 
+    fn ensure_pipeline(&mut self, renderer: &Renderer) -> Result<()> {
+        if self.pipeline.is_none() {
+            self.create_pipeline(renderer.device(), renderer.surface_format(), self.width, self.height)?;
+        }
+        Ok(())
+    }
+
     fn resize(&mut self, width: u32, height: u32) {
         self.width = width;
         self.height = height;
@@ -407,41 +412,17 @@ impl HyperbolicModule {
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/hyperbolic.wgsl").into()),
         });
 
-        // Create uniform buffer
-        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Hyperbolic Uniforms"),
-            size: std::mem::size_of::<HyperbolicUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Create bind group layout
+        // Create empty bind group layout (no bindings needed)
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("Hyperbolic Bind Group Layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
+            entries: &[],
         });
 
-        // Create bind group
+        // Create empty bind group
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Hyperbolic Bind Group"),
             layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
+            entries: &[],
         });
 
         // Create pipeline layout
@@ -488,31 +469,9 @@ impl HyperbolicModule {
 
         self.pipeline = Some(pipeline);
         self.bind_group = Some(bind_group);
-        self.uniform_buffer = Some(uniform_buffer);
         self.width = width;
         self.height = height;
 
-        Ok(())
-    }
-
-    fn update_uniforms(&mut self, renderer: &Renderer, frame: &FrameData) -> Result<()> {
-        let queue = renderer.queue();
-        let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
-
-        let uniforms = HyperbolicUniforms {
-            resolution: [frame.width as f32, frame.height as f32],
-            camera: [frame.camera.0 as f32, frame.camera.1 as f32],
-            zoom: frame.zoom as f32,
-            time: frame.time as f32,
-            pan_angle: self.pan_angle as f32,
-            pan_rate: self.config.pan_rate as f32,
-            rmax: self.config.rmax as f32,
-            palette_colors: self.palette_to_array(),
-            palette_size: self.palette.len() as u32,
-            _padding: [0; 3],
-        };
-
-        queue.write_buffer(uniform_buffer, 0, bytemuck::cast_slice(&[uniforms]));
         Ok(())
     }
 
@@ -584,6 +543,13 @@ impl WallpaperModule for SolidModule {
 
     fn bind_group(&self) -> &wgpu::BindGroup {
         self.bind_group.as_ref().unwrap()
+    }
+
+    fn ensure_pipeline(&mut self, renderer: &Renderer) -> Result<()> {
+        if self.pipeline.is_none() {
+            self.create_pipeline(renderer.device(), renderer.surface_format())?;
+        }
+        Ok(())
     }
 
     fn resize(&mut self, _width: u32, _height: u32) {
@@ -734,6 +700,13 @@ impl WallpaperModule for ImageModule {
 
     fn bind_group(&self) -> &wgpu::BindGroup {
         self.bind_group.as_ref().unwrap()
+    }
+
+    fn ensure_pipeline(&mut self, renderer: &Renderer) -> Result<()> {
+        if self.pipeline.is_none() {
+            self.create_pipeline(renderer.device(), renderer.queue(), renderer.surface_format())?;
+        }
+        Ok(())
     }
 
     fn resize(&mut self, _width: u32, _height: u32) {
@@ -903,10 +876,11 @@ struct SphericalUniforms {
     pan_angle: f32,
     pan_rate: f32,
     radius: f32,
+    _padding1: [u32; 3],          // align palette_colors to 16 bytes
     palette_colors: [[f32; 4]; 32],
     palette_size: u32,
     mode: u32,
-    _padding: [u32; 2],
+    _padding2: [u32; 2],          // align struct size to 16 bytes
 }
 
 /// Spherical wallpaper module — positive curvature tiling on a sphere
@@ -1026,6 +1000,95 @@ impl SphericalModule {
             a as f32 / 255.0,
         ])
     }
+
+    fn create_pipeline(&mut self, device: &wgpu::Device, surface_format: wgpu::TextureFormat, width: u32, height: u32) -> Result<()> {
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("Spherical Wallpaper Shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/spherical.wgsl").into()),
+        });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Spherical Uniforms"),
+            size: std::mem::size_of::<SphericalUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Spherical Bind Group Layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Spherical Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("Spherical Pipeline Layout"),
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Spherical Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        self.pipeline = Some(pipeline);
+        self.bind_group = Some(bind_group);
+        self.uniform_buffer = Some(uniform_buffer);
+        self.width = width;
+        self.height = height;
+
+        Ok(())
+    }
 }
 
 impl WallpaperModule for SphericalModule {
@@ -1054,6 +1117,13 @@ impl WallpaperModule for SphericalModule {
 
     fn bind_group(&self) -> &wgpu::BindGroup {
         self.bind_group.as_ref().unwrap()
+    }
+
+    fn ensure_pipeline(&mut self, renderer: &Renderer) -> Result<()> {
+        if self.pipeline.is_none() {
+            self.create_pipeline(renderer.device(), renderer.surface_format(), self.width, self.height)?;
+        }
+        Ok(())
     }
 
     fn resize(&mut self, _width: u32, _height: u32) {

@@ -94,7 +94,7 @@ impl Renderer {
             .await?;
 
         // Use a standard format for offscreen rendering
-        let surface_format = TextureFormat::Bgra8UnormSrgb;
+        let surface_format = TextureFormat::Rgba8UnormSrgb;
 
         Ok(Self {
             device: Arc::new(device),

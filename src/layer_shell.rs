@@ -16,7 +16,7 @@ use smithay_client_toolkit::{
     shm::slot::{Slot, SlotPool},
 };
 use tracing::{debug, info, warn};
-use wayland_client::{Connection, QueueHandle, Proxy};
+use wayland_client::{Connection, EventQueue, QueueHandle, Proxy};
 use wayland_client::protocol::wl_output::WlOutput;
 use wayland_client::protocol::wl_surface::WlSurface;
 use wayland_client::protocol::wl_output::Transform;
@@ -178,7 +178,13 @@ impl LayerShell {
         self.height
     }
 
-    /// Run one iteration of the event loop (non-blocking)
+    /// Read pending Wayland events from the connection socket and dispatch them
+    pub fn read_events(&mut self) -> Result<()> {
+        self.event_queue.blocking_dispatch(&mut self.data)?;
+        Ok(())
+    }
+
+    /// Dispatch already-read Wayland events (non-blocking)
     pub fn dispatch_pending(&mut self) -> Result<()> {
         self.event_queue.dispatch_pending(&mut self.data)?;
         Ok(())
