@@ -19,8 +19,11 @@ struct HyperbolicUniforms {
     pan_angle: f32,
     pan_rate: f32,
     rmax: f32,
-    _padding: [u32; 3],
+    center_count: u32,
 }
+
+/// Number of tiling cells uploaded to the hyperbolic shader
+const HYPERBOLIC_MAX_CELLS: usize = 256;
 
 /// Uniforms for solid color shader
 #[repr(C)]
@@ -236,12 +239,15 @@ pub trait WallpaperModule: Send + Sync {
     fn name(&self) -> &str;
 }
 
-/// Hyperbolic mosaic wallpaper module (the {7,3} tiling)
+/// Hyperbolic {5,4} pentagon tiling module
 pub struct HyperbolicModule {
     config: HyperbolicConfig,
     pipeline: Option<wgpu::RenderPipeline>,
     bind_group: Option<wgpu::BindGroup>,
     uniform_buffer: Option<wgpu::Buffer>,
+    centers_buffer: Option<wgpu::Buffer>,
+    /// Per-cell data: [cx, cy, color_index, unused] in Poincaré disk coords
+    centers: Vec<[f32; 4]>,
     width: u32,
     height: u32,
     pan_angle: f64,
@@ -256,11 +262,17 @@ impl HyperbolicModule {
         // Parse palette
         let palette = Self::parse_palette(&config.palette)?;
 
+        // Generate {5,4} tiling cell centers via BFS reflections
+        let centers = Self::generate_pentagon_centers(HYPERBOLIC_MAX_CELLS);
+        debug!("Generated {} hyperbolic pentagon cells", centers.len());
+
         Ok(Self {
             config: config.clone(),
             pipeline: None,
             bind_group: None,
             uniform_buffer: None,
+            centers_buffer: None,
+            centers,
             width: 0,
             height: 0,
             pan_angle: 0.0,
@@ -269,6 +281,95 @@ impl HyperbolicModule {
             transition: 1.0,
             transition_speed: 0.5,
         })
+    }
+
+    /// Möbius translation: hyperbolic isometry sending origin to `c`
+    fn mobius(z: [f64; 2], c: [f64; 2]) -> [f64; 2] {
+        let den = 1.0 + c[0] * z[0] + c[1] * z[1];
+        [(z[0] + c[0]) / den, (z[1] + c[1]) / den]
+    }
+
+    /// Reflect point `z` across the hyperbolic geodesic through `a` and `b`
+    /// (a circle orthogonal to the unit circle)
+    fn reflect_across(z: [f64; 2], a: [f64; 2], b: [f64; 2]) -> [f64; 2] {
+        let va = (a[0] * a[0] + a[1] * a[1] - 1.0) * 0.5;
+        let vb = (b[0] * b[0] + b[1] * b[1] - 1.0) * 0.5;
+        let det = a[0] * b[1] - a[1] * b[0];
+        if det.abs() < 1e-9 {
+            return z;
+        }
+        let cx = (va * b[1] - vb * a[1]) / det;
+        let cy = (a[0] * vb - b[0] * va) / det;
+        let rr = cx * cx + cy * cy - 1.0; // squared orthogonal-circle radius
+        let wx = z[0] - cx;
+        let wy = z[1] - cy;
+        let w2 = wx * wx + wy * wy;
+        if w2 < 1e-12 {
+            return z;
+        }
+        [cx + rr * wx / w2, cy + rr * wy / w2]
+    }
+
+    /// Generate {5,4} tiling centers: start with a central pentagon, then
+    /// reflect its center across every geodesic side (BFS), deduplicating.
+    /// Colors alternate against the parent cell so neighbors never match.
+    fn generate_pentagon_centers(max_cells: usize) -> Vec<[f32; 4]> {
+        const P: usize = 5;
+        // Euclidean vertex radius of the central pentagon in the Poincaré
+        // disk for a {5,4} tiling: tanh(acosh(cos(pi/4)/sin(pi/5)) / 2)
+        const VERT_R: f64 = 0.30796;
+        const MIN_SEP: f64 = 0.25; // neighbor centers sit ~0.48 apart
+
+        let base_verts: Vec<[f64; 2]> = (0..P)
+            .map(|k| {
+                let a = std::f64::consts::TAU * k as f64 / P as f64;
+                [VERT_R * a.cos(), VERT_R * a.sin()]
+            })
+            .collect();
+
+        let mut centers: Vec<[f64; 2]> = vec![[0.0, 0.0]];
+        let mut colors: Vec<f32> = vec![0.0];
+        let mut verts: Vec<Vec<[f64; 2]>> = vec![base_verts.clone()];
+
+        let mut qi = 0usize;
+        while qi < centers.len() && centers.len() < max_cells {
+            let c = centers[qi];
+            let vs = verts[qi].clone();
+            let pcol = colors[qi] as i32;
+
+            for k in 0..P {
+                let a = vs[k];
+                let b = vs[(k + 1) % P];
+                let nb = Self::reflect_across(c, a, b);
+
+                // Deduplicate against every known center (euclidean is enough)
+                let dup = centers.iter().any(|o| {
+                    let dx = o[0] - nb[0];
+                    let dy = o[1] - nb[1];
+                    dx * dx + dy * dy < MIN_SEP * MIN_SEP
+                });
+                if dup {
+                    continue;
+                }
+
+                // Color must differ from the parent cell
+                let ncol = ((pcol + 1 + k as i32 % 4) % 5) as f32;
+
+                let nverts: Vec<[f64; 2]> =
+                    vs.iter().map(|v| Self::mobius(*v, nb)).collect();
+
+                centers.push(nb);
+                colors.push(ncol);
+                verts.push(nverts);
+            }
+            qi += 1;
+        }
+
+        centers
+            .iter()
+            .zip(colors.iter())
+            .map(|(c, col)| [c[0] as f32, c[1] as f32, *col, 0.0])
+            .collect()
     }
 
     fn parse_palette(palette_config: &PaletteConfig) -> Result<Vec<[f32; 4]>> {

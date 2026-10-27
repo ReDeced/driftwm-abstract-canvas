@@ -134,6 +134,13 @@ impl LayerShell {
         layer_surface.set_keyboard_interactivity(KeyboardInteractivity::None);
         layer_surface.set_exclusive_zone(config.exclusive_zone);
 
+        // Make the wallpaper click-through: an empty input region means the
+        // compositor delivers all pointer/touch events to windows and canvas
+        // beneath, instead of swallowing them at the background layer.
+        let input_region = smithay_client_toolkit::compositor::Region::new(&data.compositor)
+            .context("Failed to create input region")?;
+        surface.wl_surface().set_input_region(Some(input_region.wl_region()));
+
         data.layer_surface = Some(layer_surface.clone());
 
         // Initialize SHM pool
